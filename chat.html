@@ -1,0 +1,241 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<title>AI検索チャット (Llama4 Scout)</title>
+<style>
+  * { box-sizing: border-box; }
+  body {
+    font-family: "Segoe UI", "Hiragino Sans", sans-serif;
+    background: #1e1f26;
+    color: #eee;
+    margin: 0;
+    display: flex;
+    flex-direction: column;
+    height: 100vh;
+  }
+  header {
+    padding: 14px 20px;
+    background: #2a2c38;
+    border-bottom: 1px solid #3a3c4a;
+    font-weight: bold;
+    font-size: 1.1em;
+  }
+  #chat {
+    flex: 1;
+    overflow-y: auto;
+    padding: 20px;
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+  }
+  .msg {
+    max-width: 75%;
+    padding: 10px 14px;
+    border-radius: 12px;
+    line-height: 1.5;
+    white-space: pre-wrap;
+    word-break: break-word;
+  }
+  .user { align-self: flex-end; background: #3a6df0; color: white; }
+  .assistant { align-self: flex-start; background: #2f3140; }
+  .system-note {
+    align-self: center;
+    font-size: 0.85em;
+    color: #9aa0b4;
+    background: #25262f;
+    border: 1px dashed #444a5e;
+    padding: 6px 12px;
+    border-radius: 8px;
+  }
+  #inputArea {
+    display: flex;
+    padding: 14px;
+    background: #2a2c38;
+    border-top: 1px solid #3a3c4a;
+    gap: 10px;
+  }
+  #userInput {
+    flex: 1;
+    padding: 10px 14px;
+    border-radius: 8px;
+    border: none;
+    background: #1e1f26;
+    color: #eee;
+    font-size: 1em;
+  }
+  #sendBtn {
+    padding: 10px 20px;
+    border: none;
+    border-radius: 8px;
+    background: #3a6df0;
+    color: white;
+    cursor: pointer;
+    font-size: 1em;
+  }
+  #sendBtn:disabled { background: #555; cursor: not-allowed; }
+</style>
+</head>
+<body>
+
+<header>🦙 AI検索チャット — Llama4 Scout (via Groq)</header>
+<div id="chat"></div>
+<div id="inputArea">
+  <input id="userInput" type="text" placeholder="メッセージを入力..." onkeydown="if(event.key==='Enter') sendMessage();">
+  <button id="sendBtn" onclick="sendMessage()">送信</button>
+</div>
+
+<script>
+/* =========================================================
+   設定（検索コマンド等はすべてここHTML側にまとまっている。
+   GASは一切変更不要で、ここだけ調整すればロジックを変えられる）
+   ========================================================= */
+
+// ↓↓↓ ここにGASデプロイURL（.../exec）を直接入力してください ↓↓↓
+const GAS_URL = "ここにGASのデプロイURLを貼り付け";
+// ↑↑↑ ここにGASデプロイURL（.../exec）を直接入力してください ↑↑↑
+
+// AIが検索したいときに出力するコマンドの書式: SEARCH:"検索キーワード"
+const SEARCH_COMMAND_REGEX = /^SEARCH:"(.+)"$/;
+const MAX_SEARCH_ROUNDS = 3; // 1回の応答内で連続検索できる最大回数（無限ループ防止）
+
+const SYSTEM_PROMPT = `あなたは親切で知識豊富なAIアシスタントです。
+
+あなたはインターネット検索ツールを使う能力を持っています。
+最新情報・事実確認・自分が知らないことについて質問された場合は、
+他の文章を一切書かずに、以下の形式の1行だけを出力してください。
+
+SEARCH:"検索したいキーワード"
+
+【書式のルール】
+- 必ず半角コロン(:)の後、キーワードをダブルクオート(")で囲むこと
+- 例: SEARCH:"2026年 サッカーワールドカップ 結果"
+- この行以外に説明文や挨拶などは絶対に書かないこと（この行単体で出力すること）
+
+このコマンドを出力すると、システムが自動的にDuckDuckGoで検索を行い、
+その結果をあなたに渡します。検索結果を受け取ったら、それを踏まえて
+自然な文章でユーザーへの回答を続けてください（その際はSEARCH:コマンドは不要です）。
+
+検索が不要な質問（雑談、計算、一般知識で十分なもの）には、
+SEARCH:コマンドを使わず直接自然な文章で回答してください。`;
+
+function addMessage(role, text) {
+  const chat = document.getElementById("chat");
+  const div = document.createElement("div");
+  div.className = "msg " + role;
+  div.textContent = text;
+  chat.appendChild(div);
+  chat.scrollTop = chat.scrollHeight;
+  return div;
+}
+
+function addSystemNote(text) {
+  const chat = document.getElementById("chat");
+  const div = document.createElement("div");
+  div.className = "system-note";
+  div.textContent = text;
+  chat.appendChild(div);
+  chat.scrollTop = chat.scrollHeight;
+}
+
+async function callGAS(messages) {
+  const res = await fetch(GAS_URL, {
+    method: "POST",
+    headers: { "Content-Type": "text/plain;charset=utf-8" }, // GAS doPostはContent-Typeを問わず受け取れる
+    body: JSON.stringify({ messages: messages })
+  });
+  const data = await res.json();
+  if (data.error) throw new Error(data.error);
+  return data.choices[0].message.content;
+}
+
+// DuckDuckGoの検索結果を取得（CORS制限を避けるため公開プロキシ経由でInstant Answer APIを呼ぶ）
+async function searchDuckDuckGo(query) {
+  const ddgUrl = "https://api.duckduckgo.com/?q=" + encodeURIComponent(query) + "&format=json&no_html=1&skip_disambig=1";
+  const proxyUrl = "https://api.allorigins.win/raw?url=" + encodeURIComponent(ddgUrl);
+
+  try {
+    const res = await fetch(proxyUrl);
+    const data = await res.json();
+
+    let resultText = "";
+    if (data.AbstractText) {
+      resultText += data.AbstractText + "\n";
+    }
+    if (data.RelatedTopics && data.RelatedTopics.length > 0) {
+      const topics = data.RelatedTopics.slice(0, 5).map(t => {
+        if (t.Text) return "- " + t.Text;
+        if (t.Topics) return t.Topics.slice(0,2).map(tt => "- " + tt.Text).join("\n");
+        return "";
+      }).filter(Boolean).join("\n");
+      resultText += topics;
+    }
+    if (!resultText.trim()) {
+      resultText = "（検索結果が見つかりませんでした。一般的な知識で回答してください）";
+    }
+    return resultText.trim();
+  } catch (e) {
+    return "（検索中にエラーが発生しました: " + e.message + "）";
+  }
+}
+
+async function sendMessage() {
+  const input = document.getElementById("userInput");
+  const text = input.value.trim();
+  if (!text) return;
+  if (!GAS_URL || GAS_URL.includes("ここに")) {
+    alert("HTMLファイル内の GAS_URL に、GASデプロイURLを入力してください");
+    return;
+  }
+
+  input.value = "";
+  document.getElementById("sendBtn").disabled = true;
+
+  addMessage("user", text);
+  history.push({ role: "user", content: text });
+
+  try {
+    let rounds = 0;
+
+    while (true) {
+      const reply = await callGAS(history);
+
+      // AIの応答が検索コマンド SEARCH:"キーワード" かどうかをチェック
+      const trimmed = reply.trim();
+      const match = trimmed.match(SEARCH_COMMAND_REGEX);
+
+      if (match && rounds < MAX_SEARCH_ROUNDS) {
+        rounds++;
+        const query = match[1];
+        addSystemNote("🔍 検索中: " + query);
+
+        // 会話履歴にAIの検索コマンドを記録
+        history.push({ role: "assistant", content: reply });
+
+        const searchResult = await searchDuckDuckGo(query);
+        addSystemNote("検索結果を取得しました。AIが続きを作成中...");
+
+        // 検索結果をシステムメッセージとして渡し、続きの応答を促す
+        history.push({
+          role: "user",
+          content: "【検索結果】\n" + searchResult + "\n\n上記の検索結果を踏まえて、ユーザーへの回答を続けてください。"
+        });
+
+        continue; // 再度AIに問い合わせる（連続検索にも対応）
+      }
+
+      // 通常の最終回答
+      addMessage("assistant", reply);
+      history.push({ role: "assistant", content: reply });
+      break;
+    }
+  } catch (e) {
+    addSystemNote("エラー: " + e.message);
+  } finally {
+    document.getElementById("sendBtn").disabled = false;
+  }
+}
+</script>
+
+</body>
+</html>
