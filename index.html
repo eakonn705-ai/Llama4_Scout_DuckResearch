@@ -164,30 +164,33 @@ async function callGAS(messages) {
   return data.choices[0].message.content;
 }
 
-// DuckDuckGoの検索結果を取得（CORS制限を避けるため公開プロキシ経由でInstant Answer APIを呼ぶ）
+// ↓↓↓ ここにCloudflare WorkersのデプロイURLを入力してください ↓↓↓
+const SEARCH_PROXY_URL = "https://billowing-rice-9cbd.18-kota-shobun.workers.dev/"; // 例: https://ddg-search-proxy.xxxx.workers.dev
+// ↑↑↑ ここにCloudflare WorkersのデプロイURLを入力してください ↑↑↑
+
+// Cloudflare Workers経由でDuckDuckGoの検索結果を取得
 async function searchDuckDuckGo(query) {
-  const ddgUrl = "https://api.duckduckgo.com/?q=" + encodeURIComponent(query) + "&format=json&no_html=1&skip_disambig=1";
-  const proxyUrl = "https://api.allorigins.win/raw?url=" + encodeURIComponent(ddgUrl);
+  if (!SEARCH_PROXY_URL || SEARCH_PROXY_URL.includes("ここに")) {
+    return "（検索プロキシのURLが設定されていません。HTMLファイル内のSEARCH_PROXY_URLを設定してください）";
+  }
 
   try {
-    const res = await fetch(proxyUrl);
+    const res = await fetch(SEARCH_PROXY_URL + "?q=" + encodeURIComponent(query));
     const data = await res.json();
 
+    if (data.error) {
+      return "（検索中にエラーが発生しました: " + data.error + "）";
+    }
+    if (!data.results || data.results.length === 0) {
+      return "（検索結果が見つかりませんでした。別のキーワードで再検索するか、一般的な知識で回答してください）";
+    }
+
     let resultText = "";
-    if (data.AbstractText) {
-      resultText += data.AbstractText + "\n";
-    }
-    if (data.RelatedTopics && data.RelatedTopics.length > 0) {
-      const topics = data.RelatedTopics.slice(0, 5).map(t => {
-        if (t.Text) return "- " + t.Text;
-        if (t.Topics) return t.Topics.slice(0,2).map(tt => "- " + tt.Text).join("\n");
-        return "";
-      }).filter(Boolean).join("\n");
-      resultText += topics;
-    }
-    if (!resultText.trim()) {
-      resultText = "（検索結果が見つかりませんでした。一般的な知識で回答してください）";
-    }
+    data.results.forEach((r, i) => {
+      resultText += (i + 1) + ". " + r.title + "\n";
+      if (r.snippet) resultText += "   " + r.snippet + "\n";
+    });
+
     return resultText.trim();
   } catch (e) {
     return "（検索中にエラーが発生しました: " + e.message + "）";
@@ -233,7 +236,7 @@ async function sendMessage() {
         // 検索結果をシステムメッセージとして渡し、続きの応答を促す
         chatHistory.push({
           role: "user",
-          content: "【検索結果】\n" + searchResult + "\n\n上記の検索結果を踏まえて、ユーザーへの回答を続けてください。"
+          content: "【検索結果】\n" + searchResult + "\n\n上記は今回の検索で得られた最新の検索結果です。あなた自身の学習データの知識（古い可能性がある）よりも、この検索結果の内容を優先して、ユーザーへの回答を作成してください。"
         });
 
         continue; // 再度AIに問い合わせる（連続検索にも対応）
