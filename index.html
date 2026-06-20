@@ -119,6 +119,8 @@ SEARCH:"検索したいキーワード"
 検索が不要な質問（雑談、計算、一般知識で十分なもの）には、
 SEARCH:コマンドを使わず直接自然な文章で回答してください。`;
 
+let chatHistory = [{ role: "system", content: SYSTEM_PROMPT }];
+
 function addMessage(role, text) {
   const chat = document.getElementById("chat");
   const div = document.createElement("div");
@@ -192,13 +194,13 @@ async function sendMessage() {
   document.getElementById("sendBtn").disabled = true;
 
   addMessage("user", text);
-  history.push({ role: "user", content: text });
+  chatHistory.push({ role: "user", content: text });
 
   try {
     let rounds = 0;
 
     while (true) {
-      const reply = await callGAS(history);
+      const reply = await callGAS(chatHistory);
 
       // AIの応答が検索コマンド SEARCH:"キーワード" かどうかをチェック
       const trimmed = reply.trim();
@@ -210,13 +212,13 @@ async function sendMessage() {
         addSystemNote("🔍 検索中: " + query);
 
         // 会話履歴にAIの検索コマンドを記録
-        history.push({ role: "assistant", content: reply });
+        chatHistory.push({ role: "assistant", content: reply });
 
         const searchResult = await searchDuckDuckGo(query);
         addSystemNote("検索結果を取得しました。AIが続きを作成中...");
 
         // 検索結果をシステムメッセージとして渡し、続きの応答を促す
-        history.push({
+        chatHistory.push({
           role: "user",
           content: "【検索結果】\n" + searchResult + "\n\n上記の検索結果を踏まえて、ユーザーへの回答を続けてください。"
         });
@@ -226,7 +228,7 @@ async function sendMessage() {
 
       // 通常の最終回答
       addMessage("assistant", reply);
-      history.push({ role: "assistant", content: reply });
+      chatHistory.push({ role: "assistant", content: reply });
       break;
     }
   } catch (e) {
