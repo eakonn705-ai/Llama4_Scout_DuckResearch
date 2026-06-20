@@ -147,7 +147,20 @@ async function callGAS(messages) {
     body: JSON.stringify({ messages: messages })
   });
   const data = await res.json();
-  if (data.error) throw new Error(data.error);
+
+  // GAS側でのエラー（例外）の場合: { error: "文字列" }
+  if (data.error && typeof data.error === "string") {
+    throw new Error(data.error);
+  }
+  // Groq APIがエラーを返した場合: { error: { message: "...", type: "..." } }
+  if (data.error && typeof data.error === "object") {
+    throw new Error(data.error.message || JSON.stringify(data.error));
+  }
+  // 想定外の形（choicesが無い）の場合は丸ごと表示してデバッグしやすくする
+  if (!data.choices || !data.choices[0]) {
+    throw new Error("予期しないレスポンス: " + JSON.stringify(data));
+  }
+
   return data.choices[0].message.content;
 }
 
